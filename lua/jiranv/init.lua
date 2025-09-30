@@ -105,7 +105,6 @@ M.pickers = {}
 -- Project selector picker (Bound to :JiraProject)
 M.pickers.project_selector = function()
 	local keys = M.config.project_keys
-	vim.notify(string.format("%s", vim.inspect(M.config)))
 
 	if not keys or vim.tbl_isempty(keys) then
 		vim.notify(
