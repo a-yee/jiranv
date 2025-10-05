@@ -6,6 +6,7 @@ local actions = require("telescope.actions")
 local action_state = require("telescope.actions.state")
 local pickers_module = require("telescope.pickers")
 local previewers = require("telescope.previewers")
+local adf = require("adf")
 
 -- Stores the user configuration and state
 -- project_key = plugin will use this project for each command
@@ -94,6 +95,10 @@ end
 
 -- @param issue_json table decoded json from jira issue --raw
 local function parse_issue_info(issue_json)
+	local desc = adf.ToMd(issue_json.fields.description)
+	local desc_concat = table.concat(desc, "\n")
+	local description = vim.split(desc_concat, "\n")
+
 	-- TODO: figure out a way to conceal the header syntax
 	local issue_info = {
 		string.format("# %s", issue_json.key),
@@ -102,8 +107,10 @@ local function parse_issue_info(issue_json)
 		issue_json.fields.summary,
 		"",
 		"## DESCRIPTION", -- TODO: need to figure out how to destructure this
-		string.format("%s", issue_json.fields.description),
 	}
+	for _, value in ipairs(description) do
+		table.insert(issue_info, value)
+	end
 	return issue_info
 end
 
@@ -257,8 +264,6 @@ M.pickers.open_issues = function()
 							vim.notify(string.format("Error getting info for %s: %s", entry.value, error_msg))
 							return
 						end
-						-- TODO: write helper function which parses the json then constructs nice output for preview
-						-- vim.notify(vim.inspect(issue_data))
 						local issue_info = parse_issue_info(issue_data)
 
 						local picker = action_state.get_current_picker(prompt_bufnr)
@@ -278,6 +283,76 @@ M.pickers.open_issues = function()
 							vim.api.nvim_buf_set_option(preview_bufnr, "linebreak", true)
 						end
 					end
+				end)
+
+				map("i", "<C-o>", function(prompt_bufnr, map)
+					local picker = action_state.get_current_picker(prompt_bufnr)
+					local entry = action_state.get_selected_entry()
+					if not entry or not entry.value then
+						vim.notify("No selected entry or content found.", vim.log.levels.WARN)
+						return actions.close(prompt_bufnr)
+					end
+
+					local cmd = string.format(
+						"jira issue view --project %s --plain --comments 5 %s --raw",
+						M.config.project_key,
+						entry.value
+					)
+					local output = vim.fn.system(cmd)
+					local issue_data, error_msg = vim.json.decode(output)
+					if error_msg then
+						vim.notify(string.format("Error getting info for %s: %s", entry.value, error_msg))
+						return
+					end
+					local issue_info = parse_issue_info(issue_data)
+
+					actions.close(prompt_bufnr)
+
+					-- We don't need the preview buffer ID, but we detach it for clean state
+					picker.preview_bufnr = nil
+
+					-- Gather window IDs for manual closing
+					local window_ids = { picker.preview_winid, picker.results_winid, picker.prompt_winid }
+
+					-- Iterate through the windows associated with the picker and close them manually.
+					for _, winid in ipairs(window_ids) do
+						if winid and vim.api.nvim_win_is_valid(winid) then
+							-- pcall handles cases where the window might already be closed or invalid
+							pcall(vim.api.nvim_win_close, winid, true)
+						end
+					end
+
+					local new_bufnr = vim.api.nvim_create_buf(false, { listed = false })
+					-- Execute the split
+					vim.cmd("keepalt vsplit")
+					-- Switch the new window to the scratch buffer (using the buffer ID)
+					vim.cmd("buffer " .. new_bufnr)
+					local new_winid = vim.api.nvim_get_current_win()
+
+					-- 3. Dump the content to the new buffer
+					-- Clear the new buffer's content (safer than relying on an empty buffer)
+					vim.api.nvim_buf_set_lines(new_bufnr, 0, -1, false, {})
+					-- Now set the content
+					vim.api.nvim_buf_set_lines(new_bufnr, 0, -1, false, issue_info)
+
+					-- New: Set the buffer name to the issue key
+					vim.api.nvim_buf_set_name(new_bufnr, "Jira: " .. entry.value)
+
+					-- 4. Set the desired options for the new window/buffer
+					vim.api.nvim_buf_set_option(new_bufnr, "filetype", "markdown") -- Set filetype for highlighting
+
+					vim.api.nvim_buf_set_option(new_bufnr, "textwidth", 85)
+					-- forces 85 char width for the document
+					vim.cmd("normal! gggqG")
+					-- New: Make the buffer read-only
+					vim.api.nvim_buf_set_option(new_bufnr, "readonly", true)
+					-- New: Prevent asking to save on close
+					vim.api.nvim_buf_set_option(new_bufnr, "buftype", "nofile")
+
+					vim.api.nvim_win_set_option(new_winid, "wrap", true)
+					vim.api.nvim_win_set_option(new_winid, "linebreak", true)
+					vim.api.nvim_win_set_option(new_winid, "conceallevel", 2)
+					vim.api.nvim_win_set_option(new_winid, "concealcursor", "ncv")
 				end)
 
 				---- Custom action: Add Comment
