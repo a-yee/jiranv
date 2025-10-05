@@ -1,6 +1,5 @@
 local M = {}
 
--- Load Telescope dependencies once at the top level for robustness
 local finders = require("telescope.finders")
 local sorters = require("telescope.sorters")
 local actions = require("telescope.actions")
@@ -9,14 +8,15 @@ local pickers_module = require("telescope.pickers")
 local previewers = require("telescope.previewers")
 
 -- Stores the user configuration and state
+-- project_key = plugin will use this project for each command
+-- default_project_key = init state of project_key on startup if set cfg
+-- project_keys = list of jira projects the plugin can interact with
 M.config = {
 	project_key = nil,
 	default_project_key = nil,
-	-- New configuration to store user's known project keys
 	project_keys = {},
 }
 
--- TODO: test out without Default key
 -- Check if project is set and notify if not
 local function check_project_key()
 	if not M.config.project_key then
@@ -29,13 +29,6 @@ local function check_project_key()
 	end
 	return true
 end
-
-local function set_project_key(opts)
-	local project_key = opts.args
-	M.config.project_key = project_key
-end
-
-M.JiraProject = set_project_key
 
 -- Utility function to execute the jira-cli command
 -- @param command_name (string): e.g., 'issue' or 'project'
@@ -99,6 +92,21 @@ local function picker_action_comment(prompt_bufnr)
 	M.add_comment(selection.key)
 end
 
+-- @param issue_json table decoded json from jira issue --raw
+local function parse_issue_info(issue_json)
+	-- TODO: figure out a way to conceal the header syntax
+	local issue_info = {
+		string.format("# %s", issue_json.key),
+		"",
+		"## SUMMARY",
+		issue_json.fields.summary,
+		"",
+		"## DESCRIPTION", -- TODO: need to figure out how to destructure this
+		string.format("%s", issue_json.fields.description),
+	}
+	return issue_info
+end
+
 -- =============================================================================
 -- Public API Functions
 -- =============================================================================
@@ -115,6 +123,14 @@ M.add_comment = function(issue_key)
 		vim.notify("Comment cancelled or empty.", vim.log.levels.INFO, { title = "Jira Plugin" })
 	end
 end
+
+-- Project setter (Bound to :JiraProject <project_key>)
+local function set_project_key(opts)
+	local project_key = opts.args
+	M.config.project_key = project_key
+end
+
+M.JiraProject = set_project_key
 
 M.pickers = {}
 
@@ -169,17 +185,14 @@ M.pickers.open_issues = function()
 	-- Fetch open issues for the configured project key
 	-- TODO: for now use hardcoded status filters, in the future, make this dynamic
 	-- from user configs
+	-- TODO: make the whole function parametrizable, should also consider done or narrower scope
 	local cmd = string.format(
 		"jira issue list --project %s --status 'TO DO' --status 'IN PROGRESS' --plain --columns KEY,SUMMARY,STATUS --no-headers",
 		M.config.project_key
 	)
 	local output = vim.fn.systemlist(cmd)
 
-	--local output = exec_jira({'issue', 'list', '--status', 'Open'})
-	--if not output then return end
-
 	local issues = {}
-	-- Skip the header line (output[1] is the header)
 	for i = 1, #output do
 		local line = output[i]
 		if line:match("^[%s]*%w+%-") then -- Basic check for JIRA key pattern
@@ -230,11 +243,8 @@ M.pickers.open_issues = function()
 			finder = picker_finder,
 			sorter = sorters.get_generic_fuzzy_sorter(),
 			attach_mappings = function(prompt_bufnr, map)
-				-- Default action: Open issue URL (relying on 'jira issue view' behavior)
 				map("i", "<CR>", function()
 					local entry = action_state.get_selected_entry()
-					-- TODO: rewrite the output and use --raw instead
-					-- construct something that will fit nicely in the preview
 					if entry and entry.value then
 						local cmd = string.format(
 							"jira issue view --project %s --plain --comments 5 %s --raw",
@@ -244,10 +254,12 @@ M.pickers.open_issues = function()
 						local output = vim.fn.system(cmd)
 						local issue_data, error_msg = vim.json.decode(output)
 						if error_msg then
-							vim.notify(string.format("No issue info for %s", M.config.project_key))
+							vim.notify(string.format("Error getting info for %s: %s", entry.value, error_msg))
 							return
 						end
-						vim.notify(vim.inspect(issue_data))
+						-- TODO: write helper function which parses the json then constructs nice output for preview
+						-- vim.notify(vim.inspect(issue_data))
+						local issue_info = parse_issue_info(issue_data)
 
 						local picker = action_state.get_current_picker(prompt_bufnr)
 						local previewer_state = picker.previewer.state
@@ -259,8 +271,11 @@ M.pickers.open_issues = function()
 								0, -- Start line (0 for beginning)
 								-1, -- End line (-1 for end)
 								false, -- Strict indexing
-								issue_data -- The new content (table of strings)
+								issue_info -- The new content (table of strings)
 							)
+							-- required to wrap long lines
+							vim.api.nvim_buf_set_option(preview_bufnr, "wrap", true)
+							vim.api.nvim_buf_set_option(preview_bufnr, "linebreak", true)
 						end
 					end
 				end)
@@ -284,9 +299,6 @@ M.pickers.open_issues = function()
 						return
 					end
 
-					-- The entry object from your finder's entry_maker is passed here.
-					-- We assume the raw, structured data is stored in the 'data' field.
-					--local data = entry.value
 					vim.api.nvim_buf_set_option(self.state.bufnr, "filetype", "markdown")
 				end,
 			}),

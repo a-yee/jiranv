@@ -11,3 +11,6 @@ vim.api.nvim_create_user_command("JiraProject", core.JiraProject, {
 	nargs = 1,
 	desc = "Set the active jira project",
 })
+
+-- 1. Create a unique augroup for your plugin's autocmds
+local my_plugin_augroup = vim.api.nvim_create_augroup("MyJiraPluginOptions", { clear = true })
