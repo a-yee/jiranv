@@ -16,11 +16,12 @@ M.config = {
 	project_keys = {},
 }
 
+-- TODO: test out without Default key
 -- Check if project is set and notify if not
 local function check_project_key()
 	if not M.config.project_key then
 		vim.notify(
-			"Jira project key is not set. Use :JiraProject to select one.",
+			"Jira project key is not set. Use :JiraProjects to select one.",
 			vim.log.levels.WARN,
 			{ title = "Jira Plugin" }
 		)
@@ -28,6 +29,13 @@ local function check_project_key()
 	end
 	return true
 end
+
+local function set_project_key(opts)
+	local project_key = opts.args
+	M.config.project_key = project_key
+end
+
+M.JiraProject = set_project_key
 
 -- Utility function to execute the jira-cli command
 -- @param command_name (string): e.g., 'issue' or 'project'
@@ -110,7 +118,7 @@ end
 
 M.pickers = {}
 
--- Project selector picker (Bound to :JiraProject)
+-- Project selector picker (Bound to :JiraProjects)
 M.pickers.project_selector = function()
 	if #M.config.project_keys == 0 then
 		vim.notify("No project keys defined. Please configure 'project_keys' in setup.", vim.log.levels.ERROR)
@@ -151,10 +159,6 @@ M.pickers.project_selector = function()
 		})
 		:find()
 end
-vim.api.nvim_create_user_command("JiraIssue", M.pickers.project_selector, {
-	nargs = 0,
-	desc = "Show list of jira projects available",
-})
 
 -- Issue list picker (Bound to :JiraOpenIssues)
 M.pickers.open_issues = function()
@@ -291,7 +295,7 @@ M.pickers.open_issues = function()
 end
 
 -- New function bound to :JiraProject command
-M.JiraProject = M.pickers.project_selector
+M.JiraProjects = M.pickers.project_selector
 
 -- Setup function (called by lazy.nvim)
 M.setup = function(opts)
