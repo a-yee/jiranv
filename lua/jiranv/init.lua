@@ -1,5 +1,13 @@
 local M = {}
 
+-- Load Telescope dependencies once at the top level for robustness
+local finders = require("telescope.finders")
+local sorters = require("telescope.sorters")
+local actions = require("telescope.actions")
+local action_state = require("telescope.actions.state")
+local pickers_module = require("telescope.pickers")
+local previewers = require("telescope.previewers")
+
 -- Stores the user configuration and state
 M.config = {
 	project_key = nil,
@@ -56,8 +64,8 @@ end
 -- =============================================================================
 
 local function picker_action_default(prompt_bufnr)
-	local picker = require("telescope.actions.state").get_current_picker(prompt_bufnr)
-	local selection = require("telescope.actions.state").get_selected_entry(prompt_bufnr)
+	local picker = action_state.get_current_picker(prompt_bufnr)
+	local selection = action_state.get_selected_entry(prompt_bufnr)
 
 	if not selection or not selection.key then
 		return
@@ -70,8 +78,8 @@ local function picker_action_default(prompt_bufnr)
 end
 
 local function picker_action_comment(prompt_bufnr)
-	local picker = require("telescope.actions.state").get_current_picker(prompt_bufnr)
-	local selection = require("telescope.actions.state").get_selected_entry(prompt_bufnr)
+	local picker = action_state.get_current_picker(prompt_bufnr)
+	local selection = action_state.get_selected_entry(prompt_bufnr)
 
 	if not selection or not selection.key then
 		return
@@ -104,48 +112,40 @@ M.pickers = {}
 
 -- Project selector picker (Bound to :JiraProject)
 M.pickers.project_selector = function()
-	local keys = M.config.project_keys
-	vim.notify(string.format("%s", vim.inspect(M.config)))
-
-	if not keys or vim.tbl_isempty(keys) then
-		vim.notify(
-			'No project keys defined. Set the "project_keys" option in your setup.',
-			vim.log.levels.ERROR,
-			{ title = "Jira Plugin" }
-		)
+	if #M.config.project_keys == 0 then
+		vim.notify("No project keys defined. Please configure 'project_keys' in setup.", vim.log.levels.ERROR)
 		return
 	end
 
-	local project_entries = {}
-	for _, key in ipairs(keys) do
-		-- Use the key as both the internal value and the display name
-		table.insert(project_entries, {
-			key = key,
-			value = key,
-			display = key,
-		})
-	end
+	local picker_finder = finders.new_table({
+		results = M.config.project_keys,
+		entry_maker = function(key)
+			return {
+				value = key,
+				display = key .. (key == M.config.project_key and " (Active)" or ""),
+				ordinal = key,
+			}
+		end,
+	})
 
-	require("telescope.pickers")
-		.new({}, {
+	-- Use pickers_module.new and pass the finder inside the options table
+	pickers_module
+		.new({
 			prompt_title = "Jira Project Selector",
-			finder = require("telescope.finders").new_table({ results = project_entries }),
-			sorter = require("telescope.sorters").get_generic_fuzzy_sorter(),
-			attach_mappings = function(prompt_bufnr)
-				require("telescope.actions").select_default:enhance({
-					callback = function()
-						local selection = require("telescope.actions.state").get_selected_entry(prompt_bufnr)
-						if selection and selection.key then
-							M.config.project_key = selection.key
-							vim.notify(
-								"Active Jira project set to: " .. selection.key,
-								vim.log.levels.INFO,
-								{ title = "Jira Plugin" }
-							)
-						end
-						require("telescope.actions").close(prompt_bufnr)
-					end,
-				})
+			default_selection_on_kbd_input = false,
+			finder = picker_finder,
+			sorter = sorters.get_generic_fuzzy_sorter(),
+			attach_mappings = function(prompt_bufnr, map)
+				-- Map the Enter key to select the project
+				map("i", "<CR>", function()
+					local selection = action_state.get_selected_entry()
+					actions.close(prompt_bufnr)
+					if selection and selection.value then
+						M.config.project_key = selection.value
+						-- TODO: this disappears immediately, have it render longer
+						vim.notify("Jira project set to: " .. selection.value, vim.log.levels.INFO)
+					end
+				end)
 				return true
 			end,
 		})
@@ -159,42 +159,129 @@ M.pickers.open_issues = function()
 	end
 
 	-- Fetch open issues for the configured project key
-	local cmd = string.format("jira issue list --project %s --status Open --plain", M.config.project_key)
-	local results = vim.fn.systemlist(cmd)
+	-- TODO: for now use hardcoded status filters, in the future, make this dynamic
+	-- from user configs
+	local cmd = string.format(
+		"jira issue list --project %s --status 'TO DO' --status 'IN PROGRESS' --plain --columns KEY,SUMMARY,STATUS --no-headers",
+		M.config.project_key
+	)
+	local output = vim.fn.systemlist(cmd)
 
-	local issue_entries = {}
-	for _, line in ipairs(results) do
-		-- Assuming format: <KEY> <SUMMARY> (<STATUS>)
-		local key = line:match("^%S+")
-		if key then
-			table.insert(issue_entries, {
-				key = key,
-				value = line,
-				display = line,
-			})
+	--local output = exec_jira({'issue', 'list', '--status', 'Open'})
+	--if not output then return end
+
+	local issues = {}
+	-- Skip the header line (output[1] is the header)
+	for i = 1, #output do
+		local line = output[i]
+		if line:match("^[%s]*%w+%-") then -- Basic check for JIRA key pattern
+			-- split on [\t+], get non-tab parts
+			local parts = {}
+			for part in line:gmatch("([^\t]+)") do
+				table.insert(parts, part)
+			end
+			if #parts >= 2 then
+				-- TODO: rework this section with a configuration of headers/pos
+				-- using this you can create custom layout for the output here
+				local key = parts[1]:match("([%w%d%-%s]+)")
+				local summary = parts[2]:match("^%s*(.*%S)%s*$") -- Get trimmed summary
+
+				if key and summary then
+					table.insert(issues, {
+						key = key:match("^%s*(.*%S)%s*$"), -- Final trim
+						summary = summary,
+						-- TODO: make the table fixed length and truncate summary as needed
+						display = string.format("[%s] %s", key, summary),
+						ordinal = key .. " " .. summary,
+					})
+				end
+			end
 		end
 	end
 
-	require("telescope.pickers")
-		.new({}, {
-			prompt_title = "Open Issues (" .. M.config.project_key .. ")",
-			finder = require("telescope.finders").new_table({ results = issue_entries }),
-			sorter = require("telescope.sorters").get_generic_fuzzy_sorter(),
-			attach_mappings = function(prompt_bufnr)
-				local actions = require("telescope.actions")
+	if #issues == 0 then
+		vim.notify("No Open issues found for project " .. M.config.project_key, vim.log.levels.INFO)
+		return
+	end
 
-				-- Default action: open in browser
-				actions.select_default:enhance({
-					callback = function()
-						picker_action_default(prompt_bufnr)
-					end,
-				})
+	local picker_finder = finders.new_table({
+		results = issues,
+		entry_maker = function(issue)
+			return {
+				value = issue.key,
+				display = issue.display,
+				ordinal = issue.ordinal,
+			}
+		end,
+	})
 
-				-- Custom mapping: Add comment (Ctrl-c)
-				actions.new({ i = { ["<C-c>"] = picker_action_comment } })(prompt_bufnr)
+	-- Use pickers_module.new and pass the finder inside the options table
+	pickers_module
+		.new({
+			prompt_title = M.config.project_key .. " Open Issues",
+			finder = picker_finder,
+			sorter = sorters.get_generic_fuzzy_sorter(),
+			attach_mappings = function(prompt_bufnr, map)
+				-- Default action: Open issue URL (relying on 'jira issue view' behavior)
+				map("i", "<CR>", function()
+					local entry = action_state.get_selected_entry()
+					-- TODO: rewrite the output and use --raw instead
+					-- construct something that will fit nicely in the preview
+					if entry and entry.value then
+						local cmd = string.format(
+							"jira issue view --project %s --plain --comments 5 %s --raw",
+							M.config.project_key,
+							entry.value
+						)
+						local output = vim.fn.system(cmd)
+						local issue_data, error_msg = vim.json.decode(output)
+						if error_msg then
+							vim.notify(string.format("No issue info for %s", M.config.project_key))
+							return
+						end
+						vim.notify(vim.inspect(issue_data))
 
+						local picker = action_state.get_current_picker(prompt_bufnr)
+						local previewer_state = picker.previewer.state
+						local preview_bufnr = previewer_state.bufnr
+						-- Check if the buffer is valid before attempting to write
+						if vim.api.nvim_buf_is_valid(preview_bufnr) then
+							vim.api.nvim_buf_set_lines(
+								preview_bufnr, -- The target buffer ID
+								0, -- Start line (0 for beginning)
+								-1, -- End line (-1 for end)
+								false, -- Strict indexing
+								issue_data -- The new content (table of strings)
+							)
+						end
+					end
+				end)
+
+				---- Custom action: Add Comment
+				--map("i", "<C-c>", function()
+				--	local entry = action_state.get_selected_entry()
+				--	actions.close(prompt_bufnr)
+				--	if entry and entry.value then
+				--		M.add_comment(entry.value)
+				--	end
+				--end)
 				return true
 			end,
+			previewer = previewers.new_buffer_previewer({
+				hidden = true,
+				define_preview = function(self, entry)
+					if not entry or not entry.value then
+						-- Clear the buffer if the entry is invalid or missing data
+						vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, { "No entry data available." })
+						return
+					end
+
+					-- The entry object from your finder's entry_maker is passed here.
+					-- We assume the raw, structured data is stored in the 'data' field.
+					--local data = entry.value
+					vim.api.nvim_buf_set_option(self.state.bufnr, "filetype", "markdown")
+				end,
+			}),
 		})
 		:find()
 end
